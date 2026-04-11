@@ -1,6 +1,6 @@
 --[[
     ARCHITECT: Callum
-    PROJECT: PHANTOM-ID v2 (Workspace Synced) + AC Bypass
+    PROJECT: PHANTOM-ID v2 (Workspace Synced) + Hidden Property Support
     PURPOSE: Educational ID spoofing demonstration - practice only
     PLACEMENT: /autoexec/ folder
 ]]
@@ -17,7 +17,6 @@ getgenv().PhantomID = {
     SpoofAvatar = false,
     SpoofFriendStatus = false,
     ProtectFromDetection = false,
-    BypassAntiCheat = true,  -- NEW: Enable AC bypass
 }
 
 -- SERVICES
@@ -33,10 +32,7 @@ end
 
 -- CACHED METHODS (prevents recursion and C stack overflow)
 local rawget = rawget
-local rawset = rawset
 local typeof = typeof
-local type = type
-local pairs = pairs
 local IsA = game.IsA
 local pcall = pcall
 local xpcall = xpcall
@@ -46,11 +42,6 @@ local debug_validlevel = debug and debug.validlevel
 local getfenv = getfenv
 local setreadonly = setreadonly or make_writeable
 local newcclosure = newcclosure or function(f) return f end
-local hookfunction = hookfunction or function(f) return f end
-local hookmetamethod = hookmetamethod or hookmethod
-
--- Store original require
-local _require = require
 
 -- Check if hidden property functions exist
 local has_hidden_props = gethiddenproperty ~= nil and sethiddenproperty ~= nil
@@ -95,6 +86,7 @@ end)
 local function safeGetHiddenProperty(obj, prop)
     if not has_hidden_props then return nil end
     
+    -- Use xpcall with error handler to prevent stack overflow
     local success, result = xpcall(function()
         return gethiddenproperty(obj, prop)
     end, function(err)
@@ -123,6 +115,7 @@ end
 -- HELPER: Check if an object is the LocalPlayer's Character
 local function isLocalCharacter(obj)
     if not obj then return false end
+    -- Use old_index to prevent recursion
     local char = old_index(lp, "Character")
     return obj == char
 end
@@ -134,6 +127,7 @@ local function getTargetPlayer()
         return cachedTargetPlayer 
     end
     
+    -- Search for target player
     local players_list = old_index(Players, "GetPlayers")(Players)
     for _, player in ipairs(players_list) do
         if old_index(player, "UserId") == getgenv().PhantomID.TargetID then
@@ -144,159 +138,7 @@ local function getTargetPlayer()
     return nil
 end
 
--- ============================================================================
--- ANTI-CHEAT BYPASS FUNCTIONS
--- ============================================================================
-
--- Sanitize Carbon/AC modules
-local function SanitizeCarbonModule(moduleScript)
-    local success, moduleData = pcall(_require, moduleScript)
-    if not success or type(moduleData) ~= "table" then 
-        DebugLog("Module sanitization failed or not a table:", moduleScript.Name)
-        return moduleData 
-    end
-    
-    DebugLog("Sanitizing AC module:", moduleScript.Name)
-    
-    -- Common AC flag keys
-    local flagKeys = {"Security", "Verify", "Check", "AntiCheat", "ExploitCheck", "Validate", "Authenticate"}
-    
-    for _, key in pairs(flagKeys) do
-        if rawget(moduleData, key) ~= nil then
-            DebugLog("Neutralizing flag:", key)
-            rawset(moduleData, key, function() return true end)
-        end
-    end
-    
-    -- Remove integrity checks
-    if rawget(moduleData, "Hash") or rawget(moduleData, "CheckSum") then
-        DebugLog("Removing hash/checksum")
-        rawset(moduleData, "Hash", nil)
-        rawset(moduleData, "CheckSum", nil)
-    end
-    
-    return moduleData
-end
-
--- Hook require to intercept AC modules
-local function ApplyRequirementHook()
-    if not hookfunction then
-        warn("[PhantomID] hookfunction not available, skipping require hook")
-        return
-    end
-    
-    local oldRequire
-    oldRequire = hookfunction(_require, newcclosure(function(module)
-        -- Only process external calls to ModuleScripts
-        if not checkcaller() and typeof(module) == "Instance" and module:IsA("ModuleScript") then
-            local moduleName = module.Name
-            local moduleNameLower = moduleName:lower()
-            
-            -- Target specific AC modules (Carbon, common AC names)
-            if moduleName == "1" and module.Parent and module.Parent.Name == "Settings" then
-                DebugLog("Intercepting Carbon module '1'")
-                return SanitizeCarbonModule(module)
-            end
-            
-            -- Generic AC module detection
-            if moduleNameLower:find("security") or 
-               moduleNameLower:find("anticheat") or 
-               moduleNameLower:find("anti") or
-               moduleNameLower:find("detect") or
-               moduleNameLower:find("check") then
-                
-                DebugLog("Intercepting suspected AC module:", moduleName)
-                
-                -- Return a dummy table that always returns true
-                return setmetatable({}, {
-                    __index = function() 
-                        return function() return true end 
-                    end,
-                    __newindex = function() end  -- Ignore writes
-                })
-            end
-        end
-        
-        return oldRequire(module)
-    end))
-    
-    DebugLog("Require hook applied")
-end
-
--- Neutralize render step AC loops
-local function NeutralizeRenderLoops()
-    if not hookmetamethod then
-        warn("[PhantomID] hookmetamethod not available, skipping render hook")
-        return
-    end
-    
-    local success = pcall(function()
-        local oldBind
-        oldBind = hookmetamethod(RunService, "BindToRenderStep", newcclosure(function(self, name, priority, callback)
-            if not checkcaller() then
-                local lowerName = name:lower()
-                
-                -- Block suspicious render step names
-                if lowerName:find("ac") or 
-                   lowerName:find("security") or 
-                   lowerName:find("verify") or
-                   lowerName:find("anticheat") or
-                   lowerName:find("detect") then
-                    
-                    DebugLog("Blocked render step:", name)
-                    return nil 
-                end
-            end
-            
-            return oldBind(self, name, priority, callback)
-        end))
-    end)
-    
-    if success then
-        DebugLog("Render loop hook applied")
-    else
-        warn("[PhantomID] Failed to hook BindToRenderStep")
-    end
-end
-
--- Block LogService methods (prevents AC logging)
-local function BlockLogServiceMethods()
-    pcall(function()
-        local LogService = game:GetService("LogService")
-        
-        -- Hook ClearOutput
-        if hookmetamethod then
-            hookmetamethod(LogService, "ClearOutput", newcclosure(function()
-                if not checkcaller() then
-                    DebugLog("Blocked ClearOutput call")
-                    return nil
-                end
-                return old_namecall(LogService)
-            end))
-        end
-    end)
-end
-
--- Initialize all AC bypass features
-local function InitializeACBypass()
-    if not getgenv().PhantomID.BypassAntiCheat then
-        DebugLog("AC bypass disabled")
-        return
-    end
-    
-    DebugLog("Initializing AC bypass features...")
-    
-    pcall(ApplyRequirementHook)
-    pcall(NeutralizeRenderLoops)
-    pcall(BlockLogServiceMethods)
-    
-    print("[PhantomID] AC bypass initialized")
-end
-
--- ============================================================================
--- CORE ID SPOOFING ENGINE
--- ============================================================================
-
+-- CORE ENGINE
 local function InitiatePhantomID()
     local mt = getrawmetatable(game)
     old_index = mt.__index
@@ -307,13 +149,16 @@ local function InitiatePhantomID()
     
     -- 1. PROPERTY GHOST (__index) with Hidden Property Support
     mt.__index = newcclosure(function(t, k)
+        -- CRITICAL: Check caller FIRST - immediate return for internal calls
         local is_external_call = not checkcaller()
         
-        -- Internal call with hidden property support
+        -- If it's an internal call, check for hidden property access
         if not is_external_call then
+            -- Only attempt hidden property if valid level and not from BLEnv
             if has_hidden_props and debug_validlevel and debug_validlevel(3) then
                 local caller_env = getfenv(3)
                 if caller_env ~= BLEnv then
+                    -- Try normal index first
                     local success, data = pcall(function() 
                         return old_index(t, k) 
                     end)
@@ -321,10 +166,12 @@ local function InitiatePhantomID()
                     if success then
                         return data
                     else
+                        -- Fall back to hidden property
                         return safeGetHiddenProperty(t, k)
                     end
                 end
             end
+            -- Normal internal call
             return old_index(t, k)
         end
         
@@ -375,11 +222,13 @@ local function InitiatePhantomID()
             if has_hidden_props and debug_validlevel and debug_validlevel(3) then
                 local caller_env = getfenv(3)
                 if caller_env ~= BLEnv then
+                    -- Try normal newindex first
                     local success = pcall(function() 
                         old_newindex(t, k, v)
                     end)
                     
                     if not success then
+                        -- Fall back to hidden property setter
                         safeSetHiddenProperty(t, k, v)
                     end
                     return
@@ -394,19 +243,8 @@ local function InitiatePhantomID()
     
     -- 3. METHOD REDIRECTION (__namecall)
     mt.__namecall = newcclosure(function(self, ...)
-        local is_external_call = not checkcaller()
-        local method = getnamecallmethod()
-        
-        -- Block LogService methods from external calls (AC detection)
-        if is_external_call and getgenv().PhantomID.BypassAntiCheat then
-            if method == "ClearOutput" or method == "GetLogHistory" then
-                DebugLog("Blocked LogService method:", method)
-                return nil
-            end
-        end
-        
-        -- Internal calls bypass spoofing
-        if not is_external_call then
+        -- CRITICAL: Check caller first
+        if checkcaller() then
             return old_namecall(self, ...)
         end
         
@@ -414,6 +252,7 @@ local function InitiatePhantomID()
             return old_namecall(self, ...)
         end
         
+        local method = getnamecallmethod()
         local args = {...}
         
         -- Redirect Workspace queries
@@ -480,14 +319,16 @@ local function InitiatePhantomID()
     DebugLog("Metatable hooks initialized with hidden property support:", has_hidden_props)
 end
 
--- CHARACTER PHYSICAL SYNC
+-- 4. CHARACTER PHYSICAL SYNC
 local function SyncCharacter(char)
     if not char then return end
     
     DebugLog("SyncCharacter called for:", char)
     
+    -- Wait for character to be fully loaded
     task_wait(0.2)
     
+    -- Try both normal and hidden property methods
     local success = pcall(function()
         char.Name = getgenv().PhantomID.TargetName
     end)
@@ -506,7 +347,7 @@ local function SyncCharacter(char)
     RealUserData.Character = char
 end
 
--- RUNTIME CONTROLS
+-- 5. RUNTIME CONTROLS
 local function Toggle(state)
     getgenv().PhantomID.Enabled = state
     print("[PhantomID]", state and "ENABLED" or "DISABLED")
@@ -529,20 +370,12 @@ getgenv().PhantomID.Toggle = Toggle
 getgenv().PhantomID.SetTarget = SetTarget
 getgenv().PhantomID.GetRealData = function() return RealUserData end
 
--- ============================================================================
--- INITIALIZE EVERYTHING
--- ============================================================================
-
+-- INITIALIZE
 task_spawn(function()
-    -- 1. Initialize AC bypass FIRST (before spoofing)
-    InitializeACBypass()
-    
-    -- 2. Then initialize ID spoofing
     InitiatePhantomID()
     
     task_wait(0.5)
     
-    -- 3. Handle character sync
     if lp.Character then 
         DebugLog("Character already exists, syncing...")
         SyncCharacter(lp.Character) 
@@ -553,10 +386,8 @@ task_spawn(function()
         SyncCharacter(char)
     end)
     
-    -- 4. Print status
     print("[PhantomID] ✓ Initialized successfully")
     print("[PhantomID] Target:", getgenv().PhantomID.TargetName, "(" .. getgenv().PhantomID.TargetID .. ")")
     print("[PhantomID] Hidden Properties:", has_hidden_props and "Supported" or "Not Available")
-    print("[PhantomID] AC Bypass:", getgenv().PhantomID.BypassAntiCheat and "Enabled" or "Disabled")
     print("[PhantomID] Commands: PhantomID.Toggle(bool), PhantomID.SetTarget(id, name)")
 end)
