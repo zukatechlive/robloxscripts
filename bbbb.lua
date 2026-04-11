@@ -12,11 +12,11 @@ getgenv().PhantomID = {
     TargetName = "Roblox",
     SpoofName = true,
     
-    -- NEW: Advanced options
-    Debug = false,  -- Enable debug logging
-    SpoofAvatar = false,  -- Spoof GetUserThumbnailAsync calls
-    SpoofFriendStatus = false,  -- Spoof IsFriendsWith checks
-    ProtectFromDetection = true,  -- Extra anti-detection measures
+    -- Advanced options
+    Debug = false,
+    SpoofAvatar = false,
+    SpoofFriendStatus = false,
+    ProtectFromDetection = false,  -- Changed to false by default (can cause spawn issues)
 }
 
 -- SERVICES
@@ -53,9 +53,12 @@ local RealUserData = {
     Character = nil
 }
 
--- Cache real data
+-- Forward declarations
+local old_index, old_namecall
+
+-- Cache real data BEFORE hooking
 task_spawn(function()
-    task_wait(0.5)  -- Wait for game to fully load
+    task_wait(0.1)
     RealUserData.UserId = lp.UserId
     RealUserData.Name = lp.Name
     RealUserData.DisplayName = lp.DisplayName
@@ -65,17 +68,21 @@ end)
 -- HELPER: Check if an object is the LocalPlayer's Character
 local function isLocalCharacter(obj)
     if not obj then return false end
-    local char = rawget(lp, "Character") or old_index(lp, "Character")
+    -- Use old_index to prevent recursion
+    local char = old_index(lp, "Character")
     return obj == char
 end
 
 -- HELPER: Get target player by ID (for avatar spoofing)
 local cachedTargetPlayer = nil
 local function getTargetPlayer()
-    if cachedTargetPlayer then return cachedTargetPlayer end
+    if cachedTargetPlayer and cachedTargetPlayer.Parent then 
+        return cachedTargetPlayer 
+    end
     
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player.UserId == getgenv().PhantomID.TargetID then
+    -- Search for target player
+    for _, player in ipairs(old_index(Players, "GetPlayers")(Players)) do
+        if old_index(player, "UserId") == getgenv().PhantomID.TargetID then
             cachedTargetPlayer = player
             return player
         end
@@ -83,29 +90,7 @@ local function getTargetPlayer()
     return nil
 end
 
--- ANTI-DETECTION: Simulate realistic behavior
-local antiDetectionMeasures = {
-    -- Prevent instant property checks
-    lastPropertyAccess = {},
-    
-    -- Rate limit checks (prevents scripts from spam-checking properties)
-    checkRateLimit = function(self, key)
-        local now = tick()
-        local last = self.lastPropertyAccess[key] or 0
-        self.lastPropertyAccess[key] = now
-        
-        -- If checked more than 10 times per second, might be a detection script
-        if now - last < 0.1 then
-            DebugLog("RATE LIMIT WARNING on property:", key)
-            return true  -- Potentially suspicious
-        end
-        return false
-    end
-}
-
 -- CORE ENGINE
-local old_index, old_namecall  -- Forward declare for use in isLocalCharacter
-
 local function InitiatePhantomID()
     local mt = getrawmetatable(game)
     old_index = mt.__index
@@ -115,14 +100,13 @@ local function InitiatePhantomID()
     
     -- 1. PROPERTY GHOST (__index)
     mt.__index = newcclosure(function(self, key)
-        -- Use checkcaller FIRST to short-circuit for internal calls
-        if checkcaller() or not getgenv().PhantomID.Enabled then
+        -- CRITICAL: Check caller first and return immediately for internal calls
+        if checkcaller() then
             return old_index(self, key)
         end
         
-        -- Anti-detection check
-        if getgenv().PhantomID.ProtectFromDetection then
-            antiDetectionMeasures:checkRateLimit(key)
+        if not getgenv().PhantomID.Enabled then
+            return old_index(self, key)
         end
         
         -- Handle Player Object
@@ -139,7 +123,7 @@ local function InitiatePhantomID()
                 DebugLog("Spoofing DisplayName ->", getgenv().PhantomID.TargetName)
                 return getgenv().PhantomID.TargetName 
             end
-            -- NEW: Spoof AccountAge (make it match target if possible)
+            -- Spoof AccountAge (make it match target if possible)
             if key == "AccountAge" then
                 local target = getTargetPlayer()
                 if target then
@@ -161,7 +145,12 @@ local function InitiatePhantomID()
     
     -- 2. METHOD REDIRECTION (__namecall)
     mt.__namecall = newcclosure(function(self, ...)
-        if checkcaller() or not getgenv().PhantomID.Enabled then
+        -- CRITICAL: Check caller first
+        if checkcaller() then
+            return old_namecall(self, ...)
+        end
+        
+        if not getgenv().PhantomID.Enabled then
             return old_namecall(self, ...)
         end
         
@@ -176,7 +165,7 @@ local function InitiatePhantomID()
             end
         end
         
-        -- NEW: Spoof GetPlayerByUserId
+        -- Spoof GetPlayerByUserId
         if self == Players and method == "GetPlayerByUserId" then
             if args[1] == getgenv().PhantomID.TargetID then
                 DebugLog("Redirecting GetPlayerByUserId ->", lp.Name)
@@ -184,15 +173,15 @@ local function InitiatePhantomID()
             end
         end
         
-        -- NEW: Spoof GetPlayerFromCharacter
+        -- Spoof GetPlayerFromCharacter
         if self == Players and method == "GetPlayerFromCharacter" then
-            if isLocalCharacter(args[1]) then
+            if args[1] and isLocalCharacter(args[1]) then
                 DebugLog("GetPlayerFromCharacter called on spoofed character")
-                return lp  -- Still return the real player object
+                return lp
             end
         end
         
-        -- NEW: Spoof IsFriendsWith
+        -- Spoof IsFriendsWith
         if getgenv().PhantomID.SpoofFriendStatus and typeof(self) == "Instance" and IsA(self, "Player") and self == lp then
             if method == "IsFriendsWith" then
                 local target = getTargetPlayer()
@@ -203,9 +192,9 @@ local function InitiatePhantomID()
             end
         end
         
-        -- NEW: Spoof GetUserThumbnailAsync (avatar images)
+        -- Spoof GetUserThumbnailAsync (avatar images)
         if getgenv().PhantomID.SpoofAvatar and self == Players and method == "GetUserThumbnailAsync" then
-            if args[1] == getgenv().PhantomID.TargetID or args[1] == RealUserData.UserId then
+            if args[1] == RealUserData.UserId then
                 DebugLog("Spoofing GetUserThumbnailAsync")
                 args[1] = getgenv().PhantomID.TargetID
                 return old_namecall(self, unpack(args))
@@ -229,13 +218,17 @@ local function InitiatePhantomID()
     end)
     
     setreadonly(mt, true)
+    DebugLog("Metatable hooks initialized")
 end
 
 -- 3. CHARACTER PHYSICAL SYNC
 local function SyncCharacter(char)
     if not char then return end
     
-    task_wait(0.1)
+    DebugLog("SyncCharacter called for:", char)
+    
+    -- Wait for character to be fully loaded
+    task_wait(0.2)
     
     -- Protect against AC detection
     local success, err = pcall(function()
@@ -253,13 +246,11 @@ local function SyncCharacter(char)
 end
 
 -- 4. RUNTIME CONTROLS
--- Allow toggling on/off during runtime
 local function Toggle(state)
     getgenv().PhantomID.Enabled = state
     print("[PhantomID]", state and "ENABLED" or "DISABLED")
 end
 
--- Allow changing target on the fly
 local function SetTarget(userId, userName)
     getgenv().PhantomID.TargetID = userId
     getgenv().PhantomID.TargetName = userName
@@ -278,31 +269,31 @@ getgenv().PhantomID.Toggle = Toggle
 getgenv().PhantomID.SetTarget = SetTarget
 getgenv().PhantomID.GetRealData = function() return RealUserData end
 
--- 5. HEARTBEAT MONITOR (optional - detect if hooks are broken)
-if getgenv().PhantomID.ProtectFromDetection then
-    RunService.Heartbeat:Connect(function()
-        -- Verify hooks are still active
-        local mt = getrawmetatable(game)
-        if mt.__index == old_index or mt.__namecall == old_namecall then
-            warn("[PhantomID] CRITICAL: Hooks have been restored! Re-initializing...")
-            InitiatePhantomID()
-        end
-    end)
-end
-
 -- INITIALIZE
 task_spawn(function()
+    -- Initialize hooks FIRST
     InitiatePhantomID()
+    
+    -- Small delay to let game initialize
+    task_wait(0.5)
     
     -- Handle existing character
     if lp.Character then 
+        DebugLog("Character already exists, syncing...")
         SyncCharacter(lp.Character) 
     end
     
     -- Handle future respawns
-    lp.CharacterAdded:Connect(SyncCharacter)
+    lp.CharacterAdded:Connect(function(char)
+        DebugLog("CharacterAdded event fired")
+        SyncCharacter(char)
+    end)
     
     print("[PhantomID] ✓ Initialized successfully")
     print("[PhantomID] Target:", getgenv().PhantomID.TargetName, "(" .. getgenv().PhantomID.TargetID .. ")")
     print("[PhantomID] Commands: PhantomID.Toggle(bool), PhantomID.SetTarget(id, name)")
+    
+    if getgenv().PhantomID.Debug then
+        print("[PhantomID] Debug mode enabled")
+    end
 end)
